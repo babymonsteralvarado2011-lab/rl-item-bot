@@ -5,8 +5,11 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  AttachmentBuilder,
-  EmbedBuilder
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder
 } = require('discord.js');
 
 const fetch = require('node-fetch');
@@ -23,18 +26,9 @@ const {
   USER_ID
 } = process.env;
 
-const SHOP_API = 'https://rlshop.gg/api/shop';
-const SHOP_IMAGE = 'https://bot.rocketslabs.com/shop-image';
-
+// ===== DATA =====
 const DATA_FILE = './data.json';
 
-// ===== ENV CHECK =====
-if (!TOKEN || !CLIENT_ID || !GUILD_ID || !SHOP_CHANNEL_ID || !ALERT_CHANNEL_ID || !USER_ID) {
-  console.error("❌ Missing environment variables");
-  process.exit(1);
-}
-
-// ===== DATA =====
 if (!fs.existsSync(DATA_FILE)) {
   fs.writeFileSync(DATA_FILE, JSON.stringify({
     wanted: [],
@@ -43,17 +37,8 @@ if (!fs.existsSync(DATA_FILE)) {
   }, null, 2));
 }
 
-const readData = () => {
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE));
-  } catch {
-    return { wanted: [], lastFound: [], lastShopHash: "" };
-  }
-};
-
-const writeData = (data) => {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-};
+const readData = () => JSON.parse(fs.readFileSync(DATA_FILE));
+const writeData = d => fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2));
 
 // ===== CLIENT =====
 const client = new Client({
@@ -64,216 +49,241 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName('shop')
-    .setDescription('Show current Rocket League item shop'),
+    .setDescription('Open Rocket League shop'),
 
   new SlashCommandBuilder()
     .setName('additem')
     .setDescription('Track an item')
-    .addStringOption(opt =>
-      opt.setName('name').setDescription('Item name to track').setRequired(true)
+    .addStringOption(o =>
+      o.setName('name')
+        .setDescription('Item name')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('removeitem')
-    .setDescription('Remove a tracked item')
-    .addStringOption(opt =>
-      opt.setName('name').setDescription('Item name to remove').setRequired(true)
+    .setDescription('Remove tracked item')
+    .addStringOption(o =>
+      o.setName('name')
+        .setDescription('Item name')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('listitems')
-    .setDescription('List tracked items')
-].map(cmd => cmd.toJSON());
+    .setDescription('Show tracked items')
+].map(c => c.toJSON());
 
-// ===== REGISTER =====
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-async function registerCommands() {
-  await rest.put(
-    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-    { body: commands }
+// ===== FETCH SHOP =====
+async function fetchShop() {
+  const urls = [
+    'https://rocket-league.com/api/itemshop',
+    'https://rlshop.gg/api/shop'
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+
+      const json = await res.json();
+      const items = json.items || json.data || json;
+
+      if (Array.isArray(items)) return items;
+    } catch {}
+  }
+
+  throw new Error("Shop API failed");
+}
+
+// ===== HELPERS =====
+const normalize = str =>
+  (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+function getFiltered(items, section, rarity) {
+  let filtered = items.filter(i =>
+    (i.section || '').toLowerCase().includes(section)
   );
-  console.log("✅ Commands registered");
+
+  if (rarity !== 'all') {
+    filtered = filtered.filter(i =>
+      (i.rarity || '').toLowerCase() === rarity
+    );
+  }
+
+  return filtered;
+}
+
+// ===== EMBED =====
+function buildEmbed(items, section, page, rarity) {
+  const perPage = 5;
+  const filtered = getFiltered(items, section, rarity);
+  const slice = filtered.slice(page * perPage, page * perPage + perPage);
+
+  return new EmbedBuilder()
+    .setTitle(`🛒 ${section.toUpperCase()} SHOP`)
+    .setDescription(
+      slice.length
+        ? slice.map(i =>
+            `**${i.name}**\n💰 ${i.price || '?'} credits\n🎨 ${i.rarity || 'Unknown'}`
+          ).join('\n\n')
+        : 'No items found'
+    )
+    .setImage('https://rlshop.gg/api/image')
+    .setFooter({ text: `Page ${page + 1}` });
+}
+
+// ===== COMPONENTS =====
+function buildComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prev').setLabel('⬅️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('next').setLabel('➡️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('refresh').setLabel('🔄').setStyle(ButtonStyle.Success)
+    ),
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('filter')
+        .setPlaceholder('Filter by rarity')
+        .addOptions([
+          { label: 'All', value: 'all' },
+          { label: 'Import', value: 'import' },
+          { label: 'Exotic', value: 'exotic' },
+          { label: 'Black Market', value: 'blackmarket' }
+        ])
+    )
+  ];
 }
 
 // ===== READY =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  await registerCommands();
-  checkShop(true);
+
+  await rest.put(
+    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+    { body: commands }
+  );
 });
 
-// ===== HELPERS =====
-const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-const findMatches = (shop, wanted) => {
-  return shop.filter(item =>
-    wanted.some(w => normalize(item.name).includes(normalize(w)))
-  );
-};
-
-const groupItems = (items) => {
-  const groups = { Featured: [], Daily: [], Bundles: [], Other: [] };
-
-  items.forEach(item => {
-    const type = (item.section || "").toLowerCase();
-
-    if (type.includes('featured')) groups.Featured.push(item);
-    else if (type.includes('daily')) groups.Daily.push(item);
-    else if (type.includes('bundle')) groups.Bundles.push(item);
-    else groups.Other.push(item);
-  });
-
-  return groups;
-};
-
-// ===== COMMAND HANDLER =====
+// ===== INTERACTIONS =====
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-
   const data = readData();
 
-  if (interaction.commandName === 'shop') {
-    try {
-      const res = await fetch(SHOP_API);
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === 'shop') {
+      let items = await fetchShop();
+      let section = 'featured';
+      let page = 0;
+      let rarity = 'all';
 
-      if (!res.ok) throw new Error("API failed");
+      const msg = await interaction.reply({
+        embeds: [buildEmbed(items, section, page, rarity)],
+        components: buildComponents(),
+        fetchReply: true
+      });
 
-      const text = await res.text();
-      const json = JSON.parse(text);
-      const items = json.items || json;
+      const collector = msg.createMessageComponentCollector({
+        time: 300000
+      });
 
-      if (!Array.isArray(items)) throw new Error("Invalid data");
+      collector.on('collect', async i => {
+        if (i.user.id !== interaction.user.id) {
+          return i.reply({ content: "Not your menu", ephemeral: true });
+        }
 
-      const groups = groupItems(items);
-      const image = new AttachmentBuilder(SHOP_IMAGE, { name: 'shop.png' });
+        if (i.customId === 'next') page++;
+        if (i.customId === 'prev') page = Math.max(0, page - 1);
+        if (i.customId === 'refresh') items = await fetchShop();
 
-      const embed = new EmbedBuilder()
-        .setTitle('🛒 Rocket League Item Shop')
-        .setColor(0x00b0f4)
-        .setImage('attachment://shop.png')
-        .setTimestamp();
+        if (i.isStringSelectMenu()) {
+          rarity = i.values[0];
+          page = 0;
+        }
 
-      if (groups.Featured.length)
-        embed.addFields({
-          name: '⭐ Featured',
-          value: groups.Featured.slice(0, 5).map(i => `• ${i.name} — ${i.price}c`).join('\n')
+        await i.update({
+          embeds: [buildEmbed(items, section, page, rarity)],
+          components: buildComponents()
         });
-
-      if (groups.Daily.length)
-        embed.addFields({
-          name: '📅 Daily',
-          value: groups.Daily.slice(0, 5).map(i => `• ${i.name} — ${i.price}c`).join('\n')
-        });
-
-      await interaction.reply({ embeds: [embed], files: [image] });
-
-    } catch (err) {
-      console.error("SHOP ERROR:", err);
-      await interaction.reply({
-        content: "❌ Shop API failed. Try again in a minute.",
-        ephemeral: true
       });
     }
-  }
 
-  if (interaction.commandName === 'additem') {
-    const name = interaction.options.getString('name');
+    if (interaction.commandName === 'additem') {
+      const name = interaction.options.getString('name');
 
-    if (!data.wanted.includes(name)) {
-      data.wanted.push(name);
-      writeData(data);
-      await interaction.reply(`✅ Tracking **${name}**`);
-    } else {
-      await interaction.reply('⚠️ Already tracking');
+      if (!data.wanted.includes(name)) {
+        data.wanted.push(name);
+        writeData(data);
+        await interaction.reply(`✅ Tracking ${name}`);
+      } else {
+        await interaction.reply('⚠️ Already tracking that item');
+      }
     }
-  }
 
-  if (interaction.commandName === 'removeitem') {
-    const name = interaction.options.getString('name');
-    data.wanted = data.wanted.filter(i => i.toLowerCase() !== name.toLowerCase());
-    writeData(data);
-    await interaction.reply(`❌ Removed **${name}**`);
-  }
+    if (interaction.commandName === 'removeitem') {
+      const name = interaction.options.getString('name');
 
-  if (interaction.commandName === 'listitems') {
-    await interaction.reply(
-      data.wanted.length
-        ? data.wanted.join('\n')
-        : 'No items tracked'
-    );
+      data.wanted = data.wanted.filter(i =>
+        i.toLowerCase() !== name.toLowerCase()
+      );
+
+      writeData(data);
+
+      await interaction.reply(`❌ Removed ${name}`);
+    }
+
+    if (interaction.commandName === 'listitems') {
+      await interaction.reply(
+        data.wanted.length
+          ? `📦 Tracked Items:\n${data.wanted.join('\n')}`
+          : '❌ No items tracked'
+      );
+    }
   }
 });
 
-// ===== SHOP CHECK =====
-async function checkShop(force = false) {
+// ===== AUTO CHECK =====
+async function checkShop() {
   try {
-    const res = await fetch(SHOP_API);
-    if (!res.ok) throw new Error("API failed");
-
-    const text = await res.text();
-    const json = JSON.parse(text);
-    const items = json.items || json;
-
+    const items = await fetchShop();
     const data = readData();
-    const shopHash = JSON.stringify(items.map(i => i.name));
 
-    if (!force && shopHash === data.lastShopHash) return;
+    const hash = JSON.stringify(items.map(i => i.name));
+    if (hash === data.lastShopHash) return;
 
-    data.lastShopHash = shopHash;
+    data.lastShopHash = hash;
 
-    const groups = groupItems(items);
-    const shopChannel = await client.channels.fetch(SHOP_CHANNEL_ID);
-    const image = new AttachmentBuilder(SHOP_IMAGE, { name: 'shop.png' });
+    const matches = items.filter(i =>
+      data.wanted.some(w =>
+        normalize(i.name).includes(normalize(w))
+      )
+    );
 
-    const embed = new EmbedBuilder()
-      .setTitle('🛒 Shop Updated')
-      .setColor(0x00b0f4)
-      .setImage('attachment://shop.png');
+    if (matches.length) {
+      const channel = await client.channels.fetch(ALERT_CHANNEL_ID);
 
-    if (groups.Featured.length)
-      embed.addFields({
-        name: '⭐ Featured',
-        value: groups.Featured.slice(0, 5).map(i => `• ${i.name} — ${i.price}c`).join('\n')
-      });
-
-    if (groups.Daily.length)
-      embed.addFields({
-        name: '📅 Daily',
-        value: groups.Daily.slice(0, 5).map(i => `• ${i.name} — ${i.price}c`).join('\n')
-      });
-
-    await shopChannel.send({ embeds: [embed], files: [image] });
-
-    const matches = findMatches(items, data.wanted);
-    const newMatches = matches.filter(i => !data.lastFound.includes(i.name));
-
-    if (newMatches.length > 0) {
-      const alertChannel = await client.channels.fetch(ALERT_CHANNEL_ID);
-
-      await alertChannel.send({
+      await channel.send({
         content: `<@${USER_ID}>`,
         embeds: [
           new EmbedBuilder()
             .setTitle('🚨 Item Found!')
-            .setColor(0xff0000)
-            .setDescription(newMatches.map(i => `• ${i.name} — ${i.price}c`).join('\n'))
+            .setDescription(matches.map(i => i.name).join('\n'))
         ]
       });
 
-      data.lastFound = matches.map(i => i.name);
+      const user = await client.users.fetch(USER_ID);
+      await user.send(`🚨 Item Found:\n${matches.map(i => i.name).join('\n')}`);
     }
 
     writeData(data);
 
   } catch (err) {
-    console.error("AUTO SHOP ERROR:", err);
+    console.error("Shop check failed:", err.message);
   }
 }
 
-// ===== CRON =====
-cron.schedule('0 17 * * *', () => checkShop(true));
-cron.schedule('*/2 * * * *', () => checkShop());
+cron.schedule('* * * * *', checkShop);
 
 // ===== LOGIN =====
 client.login(TOKEN);
