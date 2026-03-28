@@ -32,7 +32,6 @@ const DATA_FILE = './data.json';
 if (!fs.existsSync(DATA_FILE)) {
   fs.writeFileSync(DATA_FILE, JSON.stringify({
     wanted: [],
-    lastFound: [],
     lastShopHash: ""
   }, null, 2));
 }
@@ -47,31 +46,16 @@ const client = new Client({
 
 // ===== COMMANDS =====
 const commands = [
-  new SlashCommandBuilder()
-    .setName('shop')
-    .setDescription('Open Rocket League shop'),
-
+  new SlashCommandBuilder().setName('shop').setDescription('Open Rocket League shop'),
   new SlashCommandBuilder()
     .setName('additem')
     .setDescription('Track an item')
-    .addStringOption(o =>
-      o.setName('name')
-        .setDescription('Item name')
-        .setRequired(true)
-    ),
-
+    .addStringOption(o => o.setName('name').setDescription('Item name').setRequired(true)),
   new SlashCommandBuilder()
     .setName('removeitem')
     .setDescription('Remove tracked item')
-    .addStringOption(o =>
-      o.setName('name')
-        .setDescription('Item name')
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('listitems')
-    .setDescription('Show tracked items')
+    .addStringOption(o => o.setName('name').setDescription('Item name').setRequired(true)),
+  new SlashCommandBuilder().setName('listitems').setDescription('Show tracked items')
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -172,43 +156,54 @@ client.on('interactionCreate', async interaction => {
   const data = readData();
 
   if (interaction.isChatInputCommand()) {
+
+    // ===== SHOP COMMAND (FIXED) =====
     if (interaction.commandName === 'shop') {
-      let items = await fetchShop();
-      let section = 'featured';
-      let page = 0;
-      let rarity = 'all';
+      try {
+        await interaction.deferReply(); // 🔥 FIX
 
-      const msg = await interaction.reply({
-        embeds: [buildEmbed(items, section, page, rarity)],
-        components: buildComponents(),
-        fetchReply: true
-      });
+        let items = await fetchShop();
+        let section = 'featured';
+        let page = 0;
+        let rarity = 'all';
 
-      const collector = msg.createMessageComponentCollector({
-        time: 300000
-      });
-
-      collector.on('collect', async i => {
-        if (i.user.id !== interaction.user.id) {
-          return i.reply({ content: "Not your menu", ephemeral: true });
-        }
-
-        if (i.customId === 'next') page++;
-        if (i.customId === 'prev') page = Math.max(0, page - 1);
-        if (i.customId === 'refresh') items = await fetchShop();
-
-        if (i.isStringSelectMenu()) {
-          rarity = i.values[0];
-          page = 0;
-        }
-
-        await i.update({
+        const msg = await interaction.editReply({
           embeds: [buildEmbed(items, section, page, rarity)],
-          components: buildComponents()
+          components: buildComponents(),
+          fetchReply: true
         });
-      });
+
+        const collector = msg.createMessageComponentCollector({
+          time: 300000
+        });
+
+        collector.on('collect', async i => {
+          if (i.user.id !== interaction.user.id) {
+            return i.reply({ content: "Not your menu", ephemeral: true });
+          }
+
+          if (i.customId === 'next') page++;
+          if (i.customId === 'prev') page = Math.max(0, page - 1);
+          if (i.customId === 'refresh') items = await fetchShop();
+
+          if (i.isStringSelectMenu()) {
+            rarity = i.values[0];
+            page = 0;
+          }
+
+          await i.update({
+            embeds: [buildEmbed(items, section, page, rarity)],
+            components: buildComponents()
+          });
+        });
+
+      } catch (err) {
+        console.error(err);
+        await interaction.editReply("❌ Failed to load shop");
+      }
     }
 
+    // ===== ADD ITEM =====
     if (interaction.commandName === 'additem') {
       const name = interaction.options.getString('name');
 
@@ -221,6 +216,7 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // ===== REMOVE ITEM =====
     if (interaction.commandName === 'removeitem') {
       const name = interaction.options.getString('name');
 
@@ -233,6 +229,7 @@ client.on('interactionCreate', async interaction => {
       await interaction.reply(`❌ Removed ${name}`);
     }
 
+    // ===== LIST =====
     if (interaction.commandName === 'listitems') {
       await interaction.reply(
         data.wanted.length
