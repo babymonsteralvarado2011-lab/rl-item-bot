@@ -1,8 +1,10 @@
+require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const cron = require('node-cron');
 const fs = require('fs');
 
+// ===== ENV =====
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
@@ -13,16 +15,16 @@ const USER_ID = process.env.USER_ID;
 const SHOP_API = 'https://rlshop.gg/api/shop';
 const DATA_FILE = './data.json';
 
-// ✅ Safety check for missing env variables
+// ===== SAFETY CHECK =====
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !SHOP_CHANNEL_ID || !ALERT_CHANNEL_ID || !USER_ID) {
   console.error("❌ Missing environment variables");
   process.exit(1);
 }
 
-// ✅ Create data file if missing
+// ===== DATA FILE SETUP =====
 if (!fs.existsSync(DATA_FILE)) {
   fs.writeFileSync(DATA_FILE, JSON.stringify({
-    wanted: ['Anodized Pearl','Scarab','Proteus'],
+    wanted: [],
     lastFound: []
   }, null, 2));
 }
@@ -39,21 +41,24 @@ function writeData(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-client.once('ready', () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+// ===== CLIENT =====
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
 });
 
-// ✅ FIXED COMMANDS (NO MORE CRASH)
+// ===== COMMANDS =====
 const commands = [
   new SlashCommandBuilder()
+    .setName('shop')
+    .setDescription('Show current Rocket League item shop'),
+
+  new SlashCommandBuilder()
     .setName('additem')
-    .setDescription('Add an item to track')
+    .setDescription('Track an item')
     .addStringOption(opt =>
       opt.setName('name')
-         .setDescription('Item name')
-         .setRequired(true)
+        .setDescription('Item name')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -61,34 +66,56 @@ const commands = [
     .setDescription('Remove an item')
     .addStringOption(opt =>
       opt.setName('name')
-         .setDescription('Item name')
-         .setRequired(true)
+        .setDescription('Item name')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('listitems')
-    .setDescription('List tracked items')
+    .setDescription('Show tracked items')
 ].map(cmd => cmd.toJSON());
 
+// ===== REGISTER COMMANDS =====
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// ✅ Safe command registration
-(async () => {
+async function registerCommands() {
   try {
-    console.log("🔄 Registering commands...");
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log("✅ Commands registered");
+    console.log('🔄 Registering commands...');
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands }
+    );
+    console.log('✅ Commands registered!');
   } catch (err) {
-    console.error("❌ Command registration failed:", err);
+    console.error(err);
   }
-})();
+}
 
+// ===== READY =====
+client.once('ready', async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  await registerCommands();
+  checkShop(); // run on startup
+});
+
+// ===== COMMAND HANDLER =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const data = readData();
 
   try {
+    if (interaction.commandName === 'shop') {
+      await interaction.reply({
+        embeds: [{
+          title: '🛒 Rocket League Item Shop',
+          image: { url: 'https://rlshop.gg/api/image' },
+          color: 0x00b0f4,
+          timestamp: new Date()
+        }]
+      });
+    }
+
     if (interaction.commandName === 'additem') {
       const name = interaction.options.getString('name');
 
@@ -111,14 +138,20 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'listitems') {
-      await interaction.reply(data.wanted.length ? data.wanted.join(', ') : 'No items tracked');
+      await interaction.reply(
+        data.wanted.length
+          ? `📦 Tracked Items:\n${data.wanted.join('\n')}`
+          : '❌ No items tracked'
+      );
     }
+
   } catch (err) {
     console.error(err);
     await interaction.reply('❌ Error occurred');
   }
 });
 
+// ===== SHOP LOGIC =====
 function findMatches(shop, wanted) {
   return shop
     .map(i => (i.name || '').toLowerCase())
@@ -137,17 +170,17 @@ async function checkShop() {
 
     const shopChannel = await client.channels.fetch(SHOP_CHANNEL_ID);
 
-    // ✅ Always post shop image
+    // Always post shop
     await shopChannel.send({
       embeds: [{
-        title: 'Rocket League Item Shop',
+        title: '🛒 Rocket League Item Shop',
         image: { url: 'https://rlshop.gg/api/image' },
         color: 0x00b0f4,
         timestamp: new Date()
       }]
     });
 
-    // ✅ Alerts
+    // Alerts
     if (newFinds.length > 0) {
       const alertChannel = await client.channels.fetch(ALERT_CHANNEL_ID);
 
@@ -170,8 +203,8 @@ async function checkShop() {
   }
 }
 
-// ✅ Runs daily + startup
+// ===== CRON (5PM UTC) =====
 cron.schedule('0 17 * * *', checkShop);
-client.on('ready', checkShop);
 
+// ===== LOGIN =====
 client.login(TOKEN);
