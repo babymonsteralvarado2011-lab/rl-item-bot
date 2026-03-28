@@ -21,7 +21,6 @@ const {
   TOKEN,
   CLIENT_ID,
   GUILD_ID,
-  SHOP_CHANNEL_ID,
   ALERT_CHANNEL_ID,
   USER_ID
 } = process.env;
@@ -64,50 +63,58 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 const normalize = str =>
   (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// ===== PERFECT PARSER =====
-function parseItem(raw) {
-  return {
-    name: raw.name || raw.title || "Unknown Item",
-    price: raw.price || raw.credit || raw.cost || "?",
-    rarity: raw.rarity || raw.tier || raw.quality || "Unknown",
-    section: raw.section || raw.slot || raw.category || "featured"
-  };
-}
-
-// ===== FETCH SHOP (UPGRADED) =====
+// ===== MULTI API FETCH (PERFECT FIX) =====
 async function fetchShop() {
-  const urls = [
-    'https://rlshop.gg/api/shop',
-    'https://rocket-league.com/api/itemshop'
-  ];
-
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, {
+  const sources = [
+    async () => {
+      const res = await fetch('https://rl.insider.gg/api/shop', {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       });
-
-      if (!res.ok) continue;
-
       const json = await res.json();
 
-      let items = [];
+      const items = [];
 
-      if (Array.isArray(json)) items = json;
-      else if (Array.isArray(json.items)) items = json.items;
-      else if (Array.isArray(json.data)) items = json.data;
-
-      if (items.length > 0) {
-        console.log(`✅ Shop loaded from ${url}`);
-        return items.map(parseItem);
+      for (const section in json.data) {
+        for (const item of json.data[section]) {
+          items.push({
+            name: item.name,
+            price: item.price,
+            rarity: item.rarity,
+            section: section.toLowerCase()
+          });
+        }
       }
 
+      return items;
+    },
+
+    async () => {
+      const res = await fetch('https://rlshop.gg/api/shop');
+      const json = await res.json();
+      const raw = json.items || json;
+
+      return raw.map(i => ({
+        name: i.name,
+        price: i.price || '?',
+        rarity: i.rarity || 'Unknown',
+        section: (i.section || 'featured').toLowerCase()
+      }));
+    }
+  ];
+
+  for (const source of sources) {
+    try {
+      const items = await source();
+      if (items && items.length > 0) {
+        console.log("✅ Shop loaded");
+        return items;
+      }
     } catch (err) {
-      console.log(`❌ Failed: ${url}`);
+      console.log("❌ Source failed");
     }
   }
 
-  console.log("⚠️ Using fallback shop");
+  console.log("⚠️ ALL APIs FAILED");
 
   return [{
     name: "Shop unavailable",
@@ -120,7 +127,7 @@ async function fetchShop() {
 // ===== FILTER =====
 function getFiltered(items, section, rarity) {
   let filtered = items.filter(i =>
-    i.section.toLowerCase().includes(section)
+    i.section.includes(section)
   );
 
   if (rarity !== 'all') {
