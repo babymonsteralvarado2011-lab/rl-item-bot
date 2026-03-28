@@ -63,61 +63,62 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 const normalize = str =>
   (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// ===== MULTI API FETCH (PERFECT FIX) =====
+// ===== 🔥 UNBLOCKED SHOP FETCH =====
 async function fetchShop() {
-  const sources = [
-    async () => {
-      const res = await fetch('https://rl.insider.gg/api/shop', {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
+  const urls = [
+    "https://api.allorigins.win/raw?url=https://rl.insider.gg/api/shop",
+    "https://api.allorigins.win/raw?url=https://rlshop.gg/api/shop"
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+
+      if (!res.ok) continue;
+
       const json = await res.json();
+      let items = [];
 
-      const items = [];
-
-      for (const section in json.data) {
-        for (const item of json.data[section]) {
-          items.push({
-            name: item.name,
-            price: item.price,
-            rarity: item.rarity,
-            section: section.toLowerCase()
-          });
+      // rl.insider format
+      if (json.data) {
+        for (const section in json.data) {
+          for (const item of json.data[section]) {
+            items.push({
+              name: item.name,
+              price: item.price,
+              rarity: item.rarity,
+              section: section.toLowerCase()
+            });
+          }
         }
       }
 
-      return items;
-    },
+      // rlshop format
+      else if (Array.isArray(json.items) || Array.isArray(json)) {
+        const raw = json.items || json;
 
-    async () => {
-      const res = await fetch('https://rlshop.gg/api/shop');
-      const json = await res.json();
-      const raw = json.items || json;
+        items = raw.map(i => ({
+          name: i.name || "Unknown",
+          price: i.price || "?",
+          rarity: i.rarity || "Unknown",
+          section: (i.section || "featured").toLowerCase()
+        }));
+      }
 
-      return raw.map(i => ({
-        name: i.name,
-        price: i.price || '?',
-        rarity: i.rarity || 'Unknown',
-        section: (i.section || 'featured').toLowerCase()
-      }));
-    }
-  ];
-
-  for (const source of sources) {
-    try {
-      const items = await source();
-      if (items && items.length > 0) {
-        console.log("✅ Shop loaded");
+      if (items.length > 0) {
+        console.log("✅ LIVE SHOP (UNBLOCKED)");
         return items;
       }
+
     } catch (err) {
-      console.log("❌ Source failed");
+      console.log("❌ Proxy failed");
     }
   }
 
-  console.log("⚠️ ALL APIs FAILED");
+  console.log("⚠️ fallback");
 
   return [{
-    name: "Shop unavailable",
+    name: "Shop temporarily unavailable",
     price: "?",
     rarity: "Unknown",
     section: "featured"
@@ -154,7 +155,8 @@ function buildEmbed(items, section, page, rarity) {
           ).join('\n\n')
         : 'No items found'
     )
-    .setImage('https://rlshop.gg/api/image')
+    // 🔥 UNBLOCKED IMAGE
+    .setImage('https://api.allorigins.win/raw?url=https://rlshop.gg/api/image')
     .setFooter({ text: `Page ${page + 1}` });
 }
 
@@ -196,9 +198,10 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.isChatInputCommand()) {
 
+    // ===== SHOP =====
     if (interaction.commandName === 'shop') {
       try {
-        await interaction.deferReply();
+        await interaction.deferReply(); // 🔥 FIX TIMEOUT
 
         let items = await fetchShop();
         let section = 'featured';
@@ -238,6 +241,7 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // ===== ADD ITEM =====
     if (interaction.commandName === 'additem') {
       const name = interaction.options.getString('name');
 
@@ -250,6 +254,7 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // ===== REMOVE ITEM =====
     if (interaction.commandName === 'removeitem') {
       const name = interaction.options.getString('name');
 
@@ -262,6 +267,7 @@ client.on('interactionCreate', async interaction => {
       await interaction.reply(`❌ Removed ${name}`);
     }
 
+    // ===== LIST =====
     if (interaction.commandName === 'listitems') {
       await interaction.reply(
         data.wanted.length
