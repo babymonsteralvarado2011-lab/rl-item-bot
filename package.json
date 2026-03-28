@@ -1,17 +1,14 @@
 {
   "name": "rl-shop-bot",
-  "version": "2.0.0",
-  "description": "Rocket League Shop Bot with Proxy Server",
+  "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "proxy": "node server.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
     "node-fetch": "^2.6.7",
-    "node-cron": "^3.0.3",
-    "express": "^4.18.2"
+    "node-cron": "^3.0.3"
   }
 }
