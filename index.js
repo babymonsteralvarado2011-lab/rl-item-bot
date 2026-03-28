@@ -23,13 +23,12 @@ const {
   USER_ID
 } = process.env;
 
-// ===== API =====
 const SHOP_API = 'https://rlshop.gg/api/shop';
 const SHOP_IMAGE = 'https://bot.rocketslabs.com/shop-image';
 
 const DATA_FILE = './data.json';
 
-// ===== SAFE ENV CHECK =====
+// ===== ENV CHECK =====
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !SHOP_CHANNEL_ID || !ALERT_CHANNEL_ID || !USER_ID) {
   console.error("❌ Missing environment variables");
   process.exit(1);
@@ -61,7 +60,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ===== COMMANDS (FIXED — NO ERRORS) =====
+// ===== COMMANDS =====
 const commands = [
   new SlashCommandBuilder()
     .setName('shop')
@@ -71,20 +70,14 @@ const commands = [
     .setName('additem')
     .setDescription('Track an item')
     .addStringOption(opt =>
-      opt
-        .setName('name')
-        .setDescription('Item name to track')
-        .setRequired(true)
+      opt.setName('name').setDescription('Item name to track').setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('removeitem')
     .setDescription('Remove a tracked item')
     .addStringOption(opt =>
-      opt
-        .setName('name')
-        .setDescription('Item name to remove')
-        .setRequired(true)
+      opt.setName('name').setDescription('Item name to remove').setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -96,15 +89,11 @@ const commands = [
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 async function registerCommands() {
-  try {
-    await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      { body: commands }
-    );
-    console.log("✅ Commands registered");
-  } catch (err) {
-    console.error("❌ Command registration failed:", err);
-  }
+  await rest.put(
+    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+    { body: commands }
+  );
+  console.log("✅ Commands registered");
 }
 
 // ===== READY =====
@@ -144,11 +133,17 @@ client.on('interactionCreate', async interaction => {
 
   const data = readData();
 
-  try {
-    if (interaction.commandName === 'shop') {
+  if (interaction.commandName === 'shop') {
+    try {
       const res = await fetch(SHOP_API);
-      const json = await res.json();
+
+      if (!res.ok) throw new Error("API failed");
+
+      const text = await res.text();
+      const json = JSON.parse(text);
       const items = json.items || json;
+
+      if (!Array.isArray(items)) throw new Error("Invalid data");
 
       const groups = groupItems(items);
       const image = new AttachmentBuilder(SHOP_IMAGE, { name: 'shop.png' });
@@ -171,49 +166,42 @@ client.on('interactionCreate', async interaction => {
           value: groups.Daily.slice(0, 5).map(i => `• ${i.name} — ${i.price}c`).join('\n')
         });
 
-      if (groups.Bundles.length)
-        embed.addFields({
-          name: '📦 Bundles',
-          value: groups.Bundles.slice(0, 3).map(i => `• ${i.name} — ${i.price}c`).join('\n')
-        });
-
       await interaction.reply({ embeds: [embed], files: [image] });
+
+    } catch (err) {
+      console.error("SHOP ERROR:", err);
+      await interaction.reply({
+        content: "❌ Shop API failed. Try again in a minute.",
+        ephemeral: true
+      });
     }
+  }
 
-    if (interaction.commandName === 'additem') {
-      const name = interaction.options.getString('name');
+  if (interaction.commandName === 'additem') {
+    const name = interaction.options.getString('name');
 
-      if (!data.wanted.includes(name)) {
-        data.wanted.push(name);
-        writeData(data);
-        await interaction.reply(`✅ Tracking **${name}**`);
-      } else {
-        await interaction.reply('⚠️ Already tracking that item');
-      }
-    }
-
-    if (interaction.commandName === 'removeitem') {
-      const name = interaction.options.getString('name');
-
-      data.wanted = data.wanted.filter(i => i.toLowerCase() !== name.toLowerCase());
+    if (!data.wanted.includes(name)) {
+      data.wanted.push(name);
       writeData(data);
-
-      await interaction.reply(`❌ Removed **${name}**`);
+      await interaction.reply(`✅ Tracking **${name}**`);
+    } else {
+      await interaction.reply('⚠️ Already tracking');
     }
+  }
 
-    if (interaction.commandName === 'listitems') {
-      await interaction.reply(
-        data.wanted.length
-          ? `📦 Tracked Items:\n${data.wanted.join('\n')}`
-          : '❌ No items tracked'
-      );
-    }
+  if (interaction.commandName === 'removeitem') {
+    const name = interaction.options.getString('name');
+    data.wanted = data.wanted.filter(i => i.toLowerCase() !== name.toLowerCase());
+    writeData(data);
+    await interaction.reply(`❌ Removed **${name}**`);
+  }
 
-  } catch (err) {
-    console.error(err);
-    if (!interaction.replied) {
-      await interaction.reply('❌ Error occurred');
-    }
+  if (interaction.commandName === 'listitems') {
+    await interaction.reply(
+      data.wanted.length
+        ? data.wanted.join('\n')
+        : 'No items tracked'
+    );
   }
 });
 
@@ -221,7 +209,10 @@ client.on('interactionCreate', async interaction => {
 async function checkShop(force = false) {
   try {
     const res = await fetch(SHOP_API);
-    const json = await res.json();
+    if (!res.ok) throw new Error("API failed");
+
+    const text = await res.text();
+    const json = JSON.parse(text);
     const items = json.items || json;
 
     const data = readData();
@@ -229,19 +220,16 @@ async function checkShop(force = false) {
 
     if (!force && shopHash === data.lastShopHash) return;
 
-    console.log("🆕 Shop Updated!");
     data.lastShopHash = shopHash;
 
     const groups = groupItems(items);
     const shopChannel = await client.channels.fetch(SHOP_CHANNEL_ID);
-
     const image = new AttachmentBuilder(SHOP_IMAGE, { name: 'shop.png' });
 
     const embed = new EmbedBuilder()
       .setTitle('🛒 Shop Updated')
       .setColor(0x00b0f4)
-      .setImage('attachment://shop.png')
-      .setTimestamp();
+      .setImage('attachment://shop.png');
 
     if (groups.Featured.length)
       embed.addFields({
@@ -279,13 +267,13 @@ async function checkShop(force = false) {
     writeData(data);
 
   } catch (err) {
-    console.error("❌ Shop check failed:", err);
+    console.error("AUTO SHOP ERROR:", err);
   }
 }
 
 // ===== CRON =====
-cron.schedule('0 17 * * *', () => checkShop(true)); // exact reset
-cron.schedule('*/2 * * * *', () => checkShop());   // backup check
+cron.schedule('0 17 * * *', () => checkShop(true));
+cron.schedule('*/2 * * * *', () => checkShop());
 
 // ===== LOGIN =====
 client.login(TOKEN);
