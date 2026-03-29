@@ -27,14 +27,9 @@ const {
 
 // ===== DATA =====
 const DATA_FILE = './data.json';
-
 if (!fs.existsSync(DATA_FILE)) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify({
-    wanted: [],
-    lastShopHash: ""
-  }, null, 2));
+  fs.writeFileSync(DATA_FILE, JSON.stringify({ wanted: [], lastShopHash: "" }, null, 2));
 }
-
 const readData = () => JSON.parse(fs.readFileSync(DATA_FILE));
 const writeData = d => fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2));
 
@@ -57,11 +52,10 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// ===== NORMALIZE =====
-const normalize = str =>
-  (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// ===== HELPERS =====
+const normalize = str => (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// ===== FETCH SHOP (proxy + fallback) =====
+// ===== FETCH SHOP =====
 async function fetchShop() {
   try {
     const res = await fetch('https://rl-proxy-production.up.railway.app/shop');
@@ -71,7 +65,6 @@ async function fetchShop() {
     console.error("❌ Proxy fetch failed:", err.message);
   }
 
-  // fallback to unblock endpoints
   const urls = [
     "https://api.allorigins.win/raw?url=https://rl.insider.gg/api/shop",
     "https://api.allorigins.win/raw?url=https://rlshop.gg/api/shop"
@@ -107,12 +100,7 @@ async function fetchShop() {
     } catch {}
   }
 
-  return [{
-    name: "Shop temporarily unavailable",
-    price: "?",
-    rarity: "Unknown",
-    section: "featured"
-  }];
+  return [{ name: "Shop temporarily unavailable", price: "?", rarity: "Unknown", section: "featured" }];
 }
 
 // ===== FILTER & EMBED =====
@@ -130,43 +118,48 @@ function buildEmbed(items, section, page, rarity) {
   return new EmbedBuilder()
     .setTitle(`🛒 ${section.toUpperCase()} SHOP`)
     .setDescription(
-      slice.length
-        ? slice.map(i => `**${i.name}**\n💰 ${i.price} credits\n🎨 ${i.rarity}`).join('\n\n')
-        : 'No items found'
+      slice.length ? slice.map(i => `**${i.name}**\n💰 ${i.price} credits\n🎨 ${i.rarity}`).join('\n\n') : 'No items found'
     )
     .setImage('https://api.allorigins.win/raw?url=https://rlshop.gg/api/image')
     .setFooter({ text: `Page ${page + 1}` });
 }
 
 // ===== COMPONENTS =====
-function buildComponents() {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('prev').setLabel('⬅️').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('next').setLabel('➡️').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('refresh').setLabel('🔄').setStyle(ButtonStyle.Success)
-    ),
-    new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId('filter')
-        .setPlaceholder('Filter by rarity')
-        .addOptions([
-          { label: 'All', value: 'all' },
-          { label: 'Import', value: 'import' },
-          { label: 'Exotic', value: 'exotic' },
-          { label: 'Black Market', value: 'blackmarket' }
-        ])
+function buildComponents(sectionNames, currentSection, page, rarity) {
+  const sectionButtons = new ActionRowBuilder().addComponents(
+    sectionNames.map(s =>
+      new ButtonBuilder()
+        .setCustomId(`section_${s.toLowerCase()}`)
+        .setLabel(s)
+        .setStyle(s.toLowerCase() === currentSection ? ButtonStyle.Primary : ButtonStyle.Secondary)
     )
-  ];
+  );
+
+  const navButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('prev').setLabel('⬅️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('next').setLabel('➡️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('refresh').setLabel('🔄').setStyle(ButtonStyle.Success)
+  );
+
+  const filterMenu = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('filter')
+      .setPlaceholder('Filter by rarity')
+      .addOptions([
+        { label: 'All', value: 'all' },
+        { label: 'Import', value: 'import' },
+        { label: 'Exotic', value: 'exotic' },
+        { label: 'Black Market', value: 'blackmarket' }
+      ])
+  );
+
+  return [sectionButtons, navButtons, filterMenu];
 }
 
 // ===== READY =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  await rest.put(
-    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-    { body: commands }
-  );
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
   checkShop();
 });
 
@@ -174,57 +167,58 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
   const data = readData();
 
-  // Slash commands
   if (interaction.isChatInputCommand()) {
     const name = interaction.options?.getString('name');
 
     try {
-      // SHOP
+      // ===== SHOP =====
       if (interaction.commandName === 'shop') {
         await interaction.deferReply();
         let items = await fetchShop();
-        let section = 'featured';
+        const sectionNames = [...new Set(items.map(i => i.section.charAt(0).toUpperCase() + i.section.slice(1)))];
+        let currentSection = sectionNames[0].toLowerCase();
         let page = 0;
         let rarity = 'all';
 
         const msg = await interaction.editReply({
-          embeds: [buildEmbed(items, section, page, rarity)],
-          components: buildComponents(),
+          embeds: [buildEmbed(items, currentSection, page, rarity)],
+          components: buildComponents(sectionNames, currentSection, page, rarity),
           fetchReply: true
         });
 
         const collector = msg.createMessageComponentCollector({ time: 300000 });
         collector.on('collect', async i => {
-          if (i.user.id !== interaction.user.id) return i.reply({ content: "Not your menu", ephemeral: true });
+          if (i.user.id !== interaction.user.id)
+            return i.reply({ content: "Not your menu", ephemeral: true });
 
+          if (i.customId.startsWith('section_')) { currentSection = i.customId.replace('section_', ''); page = 0; }
           if (i.customId === 'next') page++;
           if (i.customId === 'prev') page = Math.max(0, page - 1);
           if (i.customId === 'refresh') items = await fetchShop();
           if (i.isStringSelectMenu()) { rarity = i.values[0]; page = 0; }
 
-          await i.update({ embeds: [buildEmbed(items, section, page, rarity)], components: buildComponents() });
+          await i.update({ embeds: [buildEmbed(items, currentSection, page, rarity)], components: buildComponents(sectionNames, currentSection, page, rarity) });
         });
       }
 
-      // ADD ITEM
+      // ===== ADD ITEM =====
       if (interaction.commandName === 'additem') {
         if (!data.wanted.includes(name)) { data.wanted.push(name); writeData(data); await interaction.reply(`✅ Tracking ${name}`); }
         else await interaction.reply('⚠️ Already tracking');
       }
 
-      // REMOVE ITEM
+      // ===== REMOVE ITEM =====
       if (interaction.commandName === 'removeitem') {
         data.wanted = data.wanted.filter(i => normalize(i) !== normalize(name));
         writeData(data);
         await interaction.reply(`❌ Removed ${name}`);
       }
 
-      // LIST ITEMS
+      // ===== LIST ITEMS =====
       if (interaction.commandName === 'listitems') {
-        await interaction.reply(
-          data.wanted.length ? `📦 Tracked:\n${data.wanted.join('\n')}` : 'None'
-        );
+        await interaction.reply(data.wanted.length ? `📦 Tracked:\n${data.wanted.join('\n')}` : 'None');
       }
+
     } catch (err) {
       console.error(err);
       if (interaction.deferred) await interaction.editReply('❌ Error occurred');
@@ -242,7 +236,6 @@ async function checkShop() {
     if (hash === data.lastShopHash) return;
     data.lastShopHash = hash;
 
-    // ALERT TRACKED ITEMS
     const matches = items.filter(i => data.wanted.some(w => normalize(i.name).includes(normalize(w))));
     if (matches.length) {
       const channel = await client.channels.fetch(ALERT_CHANNEL_ID);
@@ -250,7 +243,6 @@ async function checkShop() {
         content: `<@${USER_ID}>`,
         embeds: [new EmbedBuilder().setTitle('🚨 Item Found!').setDescription(matches.map(i => i.name).join('\n'))]
       });
-
       const user = await client.users.fetch(USER_ID);
       await user.send(`🚨 Found:\n${matches.map(i => i.name).join('\n')}`);
     }
