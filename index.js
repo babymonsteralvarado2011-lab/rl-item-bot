@@ -1,5 +1,16 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder
+} = require('discord.js');
 const fetch = require('node-fetch');
 const cron = require('node-cron');
 const fs = require('fs');
@@ -32,156 +43,216 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ===== COMMANDS =====
 const commands = [
-  new SlashCommandBuilder().setName('shop').setDescription('Show RL shop'),
+  new SlashCommandBuilder().setName('shop').setDescription('Open Rocket League shop'),
   new SlashCommandBuilder()
     .setName('additem')
-    .setDescription('Track item')
+    .setDescription('Track an item')
     .addStringOption(o => o.setName('name').setDescription('Item name').setRequired(true)),
   new SlashCommandBuilder()
     .setName('removeitem')
     .setDescription('Remove tracked item')
     .addStringOption(o => o.setName('name').setDescription('Item name').setRequired(true)),
-  new SlashCommandBuilder().setName('listitems').setDescription('List tracked items')
+  new SlashCommandBuilder().setName('listitems').setDescription('Show tracked items')
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// ===== HELPERS =====
-const normalize = str => (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// ===== NORMALIZE =====
+const normalize = str =>
+  (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// Fetch RL shop from proxy
+// ===== FETCH SHOP (proxy + fallback) =====
 async function fetchShop() {
   try {
     const res = await fetch('https://rl-proxy-production.up.railway.app/shop');
     const json = await res.json();
-
-    if (json.items && json.items.length > 0) {
-      console.log("✅ Proxy shop loaded");
-      return json.items;
-    }
+    if (json.items && json.items.length > 0) return json.items;
   } catch (err) {
     console.error("❌ Proxy fetch failed:", err.message);
   }
 
+  // fallback to unblock endpoints
+  const urls = [
+    "https://api.allorigins.win/raw?url=https://rl.insider.gg/api/shop",
+    "https://api.allorigins.win/raw?url=https://rlshop.gg/api/shop"
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const json = await res.json();
+      let items = [];
+      if (json.data) {
+        for (const section in json.data) {
+          for (const item of json.data[section]) {
+            items.push({
+              name: item.name,
+              price: item.price,
+              rarity: item.rarity,
+              section: section.toLowerCase()
+            });
+          }
+        }
+      } else if (Array.isArray(json.items) || Array.isArray(json)) {
+        const raw = json.items || json;
+        items = raw.map(i => ({
+          name: i.name || "Unknown",
+          price: i.price || "?",
+          rarity: i.rarity || "Unknown",
+          section: (i.section || "featured").toLowerCase()
+        }));
+      }
+      if (items.length) return items;
+    } catch {}
+  }
+
   return [{
-    name: "Proxy offline",
+    name: "Shop temporarily unavailable",
     price: "?",
     rarity: "Unknown",
     section: "featured"
   }];
 }
 
-// Build a Discord embed for shop
-function buildEmbed(items) {
+// ===== FILTER & EMBED =====
+function getFiltered(items, section, rarity) {
+  let filtered = items.filter(i => i.section.includes(section));
+  if (rarity !== 'all') filtered = filtered.filter(i => i.rarity.toLowerCase().includes(rarity));
+  return filtered;
+}
+
+function buildEmbed(items, section, page, rarity) {
+  const perPage = 5;
+  const filtered = getFiltered(items, section, rarity);
+  const slice = filtered.slice(page * perPage, page * perPage + perPage);
+
   return new EmbedBuilder()
-    .setTitle('🛒 Rocket League Item Shop')
+    .setTitle(`🛒 ${section.toUpperCase()} SHOP`)
     .setDescription(
-      items.map(i =>
-        `**${i.name}**\n💰 ${i.price} credits\n🎨 ${i.rarity}`
-      ).join('\n\n')
+      slice.length
+        ? slice.map(i => `**${i.name}**\n💰 ${i.price} credits\n🎨 ${i.rarity}`).join('\n\n')
+        : 'No items found'
     )
-    .setTimestamp();
+    .setImage('https://api.allorigins.win/raw?url=https://rlshop.gg/api/image')
+    .setFooter({ text: `Page ${page + 1}` });
+}
+
+// ===== COMPONENTS =====
+function buildComponents() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prev').setLabel('⬅️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('next').setLabel('➡️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('refresh').setLabel('🔄').setStyle(ButtonStyle.Success)
+    ),
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('filter')
+        .setPlaceholder('Filter by rarity')
+        .addOptions([
+          { label: 'All', value: 'all' },
+          { label: 'Import', value: 'import' },
+          { label: 'Exotic', value: 'exotic' },
+          { label: 'Black Market', value: 'blackmarket' }
+        ])
+    )
+  ];
 }
 
 // ===== READY =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-
-  // Deploy slash commands
-  try {
-    await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      { body: commands }
-    );
-    console.log("✅ Slash commands deployed");
-  } catch (err) {
-    console.error("❌ Failed to deploy commands:", err);
-  }
-
+  await rest.put(
+    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+    { body: commands }
+  );
   checkShop();
 });
 
-// ===== COMMAND HANDLER =====
+// ===== INTERACTIONS =====
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
   const data = readData();
 
-  try {
-    // --- SHOP ---
-    if (interaction.commandName === 'shop') {
-      await interaction.deferReply();
+  // Slash commands
+  if (interaction.isChatInputCommand()) {
+    const name = interaction.options?.getString('name');
 
-      const items = await fetchShop();
-      await interaction.editReply({ embeds: [buildEmbed(items)] });
-    }
+    try {
+      // SHOP
+      if (interaction.commandName === 'shop') {
+        await interaction.deferReply();
+        let items = await fetchShop();
+        let section = 'featured';
+        let page = 0;
+        let rarity = 'all';
 
-    // --- ADD ITEM ---
-    if (interaction.commandName === 'additem') {
-      const name = interaction.options.getString('name');
-      if (!data.wanted.includes(name)) {
-        data.wanted.push(name);
-        writeData(data);
-        await interaction.reply(`✅ Tracking **${name}**`);
-      } else {
-        await interaction.reply('⚠️ Already tracking that item');
+        const msg = await interaction.editReply({
+          embeds: [buildEmbed(items, section, page, rarity)],
+          components: buildComponents(),
+          fetchReply: true
+        });
+
+        const collector = msg.createMessageComponentCollector({ time: 300000 });
+        collector.on('collect', async i => {
+          if (i.user.id !== interaction.user.id) return i.reply({ content: "Not your menu", ephemeral: true });
+
+          if (i.customId === 'next') page++;
+          if (i.customId === 'prev') page = Math.max(0, page - 1);
+          if (i.customId === 'refresh') items = await fetchShop();
+          if (i.isStringSelectMenu()) { rarity = i.values[0]; page = 0; }
+
+          await i.update({ embeds: [buildEmbed(items, section, page, rarity)], components: buildComponents() });
+        });
       }
-    }
 
-    // --- REMOVE ITEM ---
-    if (interaction.commandName === 'removeitem') {
-      const name = interaction.options.getString('name');
-      data.wanted = data.wanted.filter(i => normalize(i) !== normalize(name));
-      writeData(data);
-      await interaction.reply(`❌ Removed **${name}**`);
-    }
+      // ADD ITEM
+      if (interaction.commandName === 'additem') {
+        if (!data.wanted.includes(name)) { data.wanted.push(name); writeData(data); await interaction.reply(`✅ Tracking ${name}`); }
+        else await interaction.reply('⚠️ Already tracking');
+      }
 
-    // --- LIST ITEMS ---
-    if (interaction.commandName === 'listitems') {
-      await interaction.reply(
-        data.wanted.length ? data.wanted.join('\n') : 'No tracked items'
-      );
-    }
+      // REMOVE ITEM
+      if (interaction.commandName === 'removeitem') {
+        data.wanted = data.wanted.filter(i => normalize(i) !== normalize(name));
+        writeData(data);
+        await interaction.reply(`❌ Removed ${name}`);
+      }
 
-  } catch (err) {
-    console.error(err);
-    if (interaction.deferred) {
-      await interaction.editReply('❌ An error occurred while processing the command.');
-    } else {
-      await interaction.reply('❌ An error occurred while processing the command.');
+      // LIST ITEMS
+      if (interaction.commandName === 'listitems') {
+        await interaction.reply(
+          data.wanted.length ? `📦 Tracked:\n${data.wanted.join('\n')}` : 'None'
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      if (interaction.deferred) await interaction.editReply('❌ Error occurred');
+      else await interaction.reply('❌ Error occurred');
     }
   }
 });
 
-// ===== AUTO SHOP POST & ALERTS =====
+// ===== AUTO SHOP CHECK & ALERTS =====
 async function checkShop() {
   try {
     const items = await fetchShop();
     const data = readData();
-
     const hash = JSON.stringify(items.map(i => i.name));
-    if (hash === data.lastShopHash) return; // No change
-
+    if (hash === data.lastShopHash) return;
     data.lastShopHash = hash;
 
-    // POST SHOP
-    const shopChannel = await client.channels.fetch(SHOP_CHANNEL_ID);
-    await shopChannel.send({ embeds: [buildEmbed(items)] });
-
     // ALERT TRACKED ITEMS
-    const matches = items.filter(i =>
-      data.wanted.some(w => normalize(i.name).includes(normalize(w)))
-    );
-
+    const matches = items.filter(i => data.wanted.some(w => normalize(i.name).includes(normalize(w))));
     if (matches.length) {
-      const alertChannel = await client.channels.fetch(ALERT_CHANNEL_ID);
-      await alertChannel.send({
+      const channel = await client.channels.fetch(ALERT_CHANNEL_ID);
+      await channel.send({
         content: `<@${USER_ID}>`,
-        embeds: [
-          new EmbedBuilder()
-            .setTitle('🚨 Item Found!')
-            .setDescription(matches.map(i => i.name).join('\n'))
-        ]
+        embeds: [new EmbedBuilder().setTitle('🚨 Item Found!').setDescription(matches.map(i => i.name).join('\n'))]
       });
+
+      const user = await client.users.fetch(USER_ID);
+      await user.send(`🚨 Found:\n${matches.map(i => i.name).join('\n')}`);
     }
 
     writeData(data);
@@ -190,8 +261,8 @@ async function checkShop() {
   }
 }
 
-// ===== SCHEDULE SHOP CHECK =====
-cron.schedule('* * * * *', checkShop); // every minute
+// ===== CRON =====
+cron.schedule('* * * * *', checkShop);
 
 // ===== LOGIN =====
 client.login(TOKEN);
