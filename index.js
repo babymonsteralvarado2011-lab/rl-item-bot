@@ -36,18 +36,33 @@ const writeData = d => fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2));
 // ===== CLIENT =====
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// ===== COMMANDS =====
+// ===== COMMANDS (🔥 FIXED) =====
 const commands = [
-  new SlashCommandBuilder().setName('shop').setDescription('Open RL shop'),
+  new SlashCommandBuilder()
+    .setName('shop')
+    .setDescription('Open Rocket League item shop'),
+
   new SlashCommandBuilder()
     .setName('additem')
-    .setDescription('Track item')
-    .addStringOption(o => o.setName('name').setRequired(true)),
+    .setDescription('Track an item')
+    .addStringOption(o =>
+      o.setName('name')
+        .setDescription('Item name to track') // ✅ FIX
+        .setRequired(true)
+    ),
+
   new SlashCommandBuilder()
     .setName('removeitem')
-    .setDescription('Remove item')
-    .addStringOption(o => o.setName('name').setRequired(true)),
-  new SlashCommandBuilder().setName('listitems').setDescription('Tracked items')
+    .setDescription('Remove tracked item')
+    .addStringOption(o =>
+      o.setName('name')
+        .setDescription('Item name to remove') // ✅ FIX
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('listitems')
+    .setDescription('Show tracked items')
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -55,18 +70,16 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 // ===== HELPERS =====
 const normalize = str => (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// ===== 🔥 PRO FETCH (COMBINED SOURCES) =====
+// ===== FETCH SHOP =====
 async function fetchShop() {
   let items = [];
 
-  // 1. Your proxy FIRST
   try {
     const res = await fetch('https://rl-proxy-production.up.railway.app/shop');
     const json = await res.json();
     if (json.items) items = items.concat(json.items);
   } catch {}
 
-  // 2. rl.insider
   try {
     const res = await fetch("https://api.allorigins.win/raw?url=https://rl.insider.gg/api/shop");
     const json = await res.json();
@@ -85,7 +98,6 @@ async function fetchShop() {
     }
   } catch {}
 
-  // 3. rlshop.gg
   try {
     const res = await fetch("https://api.allorigins.win/raw?url=https://rlshop.gg/api/shop");
     const json = await res.json();
@@ -99,10 +111,8 @@ async function fetchShop() {
     })));
   } catch {}
 
-  // ===== 🧠 CLEAN + CATEGORIZE =====
   return items.map(i => {
     let category = "other";
-
     if (i.section.includes("bundle")) category = "bundles";
     else if (i.section.includes("daily")) category = "daily";
     else if (i.section.includes("featured")) category = "featured";
@@ -219,7 +229,6 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      // TRACKING COMMANDS (unchanged)
       if (interaction.commandName === 'additem') {
         const name = interaction.options.getString('name');
         if (!data.wanted.includes(name)) {
@@ -248,7 +257,7 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ===== ALERT SYSTEM =====
+// ===== ALERTS =====
 async function checkShop() {
   const items = await fetchShop();
   const data = readData();
