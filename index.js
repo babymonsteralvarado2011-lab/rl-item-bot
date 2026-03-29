@@ -11,6 +11,7 @@ const {
   ButtonStyle,
   StringSelectMenuBuilder
 } = require('discord.js');
+
 const fetch = require('node-fetch');
 const cron = require('node-cron');
 const fs = require('fs');
@@ -20,7 +21,6 @@ const {
   TOKEN,
   CLIENT_ID,
   GUILD_ID,
-  SHOP_CHANNEL_ID,
   ALERT_CHANNEL_ID,
   USER_ID
 } = process.env;
@@ -38,16 +38,16 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ===== COMMANDS =====
 const commands = [
-  new SlashCommandBuilder().setName('shop').setDescription('Open Rocket League shop'),
+  new SlashCommandBuilder().setName('shop').setDescription('Open RL shop'),
   new SlashCommandBuilder()
     .setName('additem')
-    .setDescription('Track an item')
-    .addStringOption(o => o.setName('name').setDescription('Item name').setRequired(true)),
+    .setDescription('Track item')
+    .addStringOption(o => o.setName('name').setRequired(true)),
   new SlashCommandBuilder()
     .setName('removeitem')
-    .setDescription('Remove tracked item')
-    .addStringOption(o => o.setName('name').setDescription('Item name').setRequired(true)),
-  new SlashCommandBuilder().setName('listitems').setDescription('Show tracked items')
+    .setDescription('Remove item')
+    .addStringOption(o => o.setName('name').setRequired(true)),
+  new SlashCommandBuilder().setName('listitems').setDescription('Tracked items')
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -55,112 +55,125 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 // ===== HELPERS =====
 const normalize = str => (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// ===== FETCH SHOP =====
+// ===== 🔥 PRO FETCH (COMBINED SOURCES) =====
 async function fetchShop() {
+  let items = [];
+
+  // 1. Your proxy FIRST
   try {
     const res = await fetch('https://rl-proxy-production.up.railway.app/shop');
     const json = await res.json();
-    if (json.items && json.items.length > 0) return json.items;
-  } catch (err) {
-    console.error("❌ Proxy fetch failed:", err.message);
-  }
+    if (json.items) items = items.concat(json.items);
+  } catch {}
 
-  const urls = [
-    "https://api.allorigins.win/raw?url=https://rl.insider.gg/api/shop",
-    "https://api.allorigins.win/raw?url=https://rlshop.gg/api/shop"
-  ];
+  // 2. rl.insider
+  try {
+    const res = await fetch("https://api.allorigins.win/raw?url=https://rl.insider.gg/api/shop");
+    const json = await res.json();
 
-  for (const url of urls) {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) continue;
-      const json = await res.json();
-      let items = [];
-      if (json.data) {
-        for (const section in json.data) {
-          for (const item of json.data[section]) {
-            items.push({
-              name: item.name,
-              price: item.price,
-              rarity: item.rarity,
-              section: section.toLowerCase()
-            });
-          }
+    if (json.data) {
+      for (const section in json.data) {
+        for (const item of json.data[section]) {
+          items.push({
+            name: item.name,
+            price: item.price,
+            rarity: item.rarity,
+            section: section.toLowerCase()
+          });
         }
-      } else if (Array.isArray(json.items) || Array.isArray(json)) {
-        const raw = json.items || json;
-        items = raw.map(i => ({
-          name: i.name || "Unknown",
-          price: i.price || "?",
-          rarity: i.rarity || "Unknown",
-          section: (i.section || "featured").toLowerCase()
-        }));
       }
-      if (items.length) return items;
-    } catch {}
-  }
+    }
+  } catch {}
 
-  return [{ name: "Shop temporarily unavailable", price: "?", rarity: "Unknown", section: "featured" }];
+  // 3. rlshop.gg
+  try {
+    const res = await fetch("https://api.allorigins.win/raw?url=https://rlshop.gg/api/shop");
+    const json = await res.json();
+    const raw = json.items || json;
+
+    items = items.concat(raw.map(i => ({
+      name: i.name || "Unknown",
+      price: i.price || "?",
+      rarity: i.rarity || "Unknown",
+      section: (i.section || "other").toLowerCase()
+    })));
+  } catch {}
+
+  // ===== 🧠 CLEAN + CATEGORIZE =====
+  return items.map(i => {
+    let category = "other";
+
+    if (i.section.includes("bundle")) category = "bundles";
+    else if (i.section.includes("daily")) category = "daily";
+    else if (i.section.includes("featured")) category = "featured";
+
+    return { ...i, category };
+  });
 }
 
-// ===== FILTER & EMBED =====
-function getFiltered(items, section, rarity) {
-  let filtered = items.filter(i => i.section.includes(section));
-  if (rarity !== 'all') filtered = filtered.filter(i => i.rarity.toLowerCase().includes(rarity));
+// ===== FILTER =====
+function filterItems(items, category, rarity) {
+  let filtered = items.filter(i => i.category === category);
+
+  if (rarity !== 'all') {
+    filtered = filtered.filter(i =>
+      i.rarity.toLowerCase().includes(rarity)
+    );
+  }
+
   return filtered;
 }
 
-function buildEmbed(items, section, page, rarity) {
+// ===== EMBED =====
+function buildEmbed(items, category, page, rarity) {
   const perPage = 5;
-  const filtered = getFiltered(items, section, rarity);
+  const filtered = filterItems(items, category, rarity);
   const slice = filtered.slice(page * perPage, page * perPage + perPage);
 
   return new EmbedBuilder()
-    .setTitle(`🛒 ${section.toUpperCase()} SHOP`)
+    .setTitle(`🛒 ${category.toUpperCase()} SHOP`)
     .setDescription(
-      slice.length ? slice.map(i => `**${i.name}**\n💰 ${i.price} credits\n🎨 ${i.rarity}`).join('\n\n') : 'No items found'
+      slice.length
+        ? slice.map(i =>
+            `**${i.name}**\n💰 ${i.price} credits\n🎨 ${i.rarity}`
+          ).join('\n\n')
+        : 'No items found'
     )
-    .setImage('https://api.allorigins.win/raw?url=https://rlshop.gg/api/image')
     .setFooter({ text: `Page ${page + 1}` });
 }
 
 // ===== COMPONENTS =====
-function buildComponents(sectionNames, currentSection, page, rarity) {
-  const sectionButtons = new ActionRowBuilder().addComponents(
-    sectionNames.map(s =>
-      new ButtonBuilder()
-        .setCustomId(`section_${s.toLowerCase()}`)
-        .setLabel(s)
-        .setStyle(s.toLowerCase() === currentSection ? ButtonStyle.Primary : ButtonStyle.Secondary)
+function buildComponents(currentCategory) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('featured').setLabel('Featured').setStyle(currentCategory === 'featured' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('daily').setLabel('Daily').setStyle(currentCategory === 'daily' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('bundles').setLabel('Bundles').setStyle(currentCategory === 'bundles' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('other').setLabel('Other').setStyle(currentCategory === 'other' ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prev').setLabel('⬅️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('next').setLabel('➡️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('refresh').setLabel('🔄').setStyle(ButtonStyle.Success)
+    ),
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('filter')
+        .setPlaceholder('Filter rarity')
+        .addOptions([
+          { label: 'All', value: 'all' },
+          { label: 'Import', value: 'import' },
+          { label: 'Exotic', value: 'exotic' },
+          { label: 'Black Market', value: 'blackmarket' }
+        ])
     )
-  );
-
-  const navButtons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('prev').setLabel('⬅️').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('next').setLabel('➡️').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('refresh').setLabel('🔄').setStyle(ButtonStyle.Success)
-  );
-
-  const filterMenu = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId('filter')
-      .setPlaceholder('Filter by rarity')
-      .addOptions([
-        { label: 'All', value: 'all' },
-        { label: 'Import', value: 'import' },
-        { label: 'Exotic', value: 'exotic' },
-        { label: 'Black Market', value: 'blackmarket' }
-      ])
-  );
-
-  return [sectionButtons, navButtons, filterMenu];
+  ];
 }
 
 // ===== READY =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-  checkShop();
 });
 
 // ===== INTERACTIONS =====
@@ -168,93 +181,91 @@ client.on('interactionCreate', async interaction => {
   const data = readData();
 
   if (interaction.isChatInputCommand()) {
-    const name = interaction.options?.getString('name');
-
     try {
-      // ===== SHOP =====
       if (interaction.commandName === 'shop') {
         await interaction.deferReply();
+
         let items = await fetchShop();
-        const sectionNames = [...new Set(items.map(i => i.section.charAt(0).toUpperCase() + i.section.slice(1)))];
-        let currentSection = sectionNames[0].toLowerCase();
+        let category = 'featured';
         let page = 0;
         let rarity = 'all';
 
         const msg = await interaction.editReply({
-          embeds: [buildEmbed(items, currentSection, page, rarity)],
-          components: buildComponents(sectionNames, currentSection, page, rarity),
+          embeds: [buildEmbed(items, category, page, rarity)],
+          components: buildComponents(category),
           fetchReply: true
         });
 
         const collector = msg.createMessageComponentCollector({ time: 300000 });
+
         collector.on('collect', async i => {
           if (i.user.id !== interaction.user.id)
             return i.reply({ content: "Not your menu", ephemeral: true });
 
-          if (i.customId.startsWith('section_')) { currentSection = i.customId.replace('section_', ''); page = 0; }
+          if (['featured','daily','bundles','other'].includes(i.customId)) {
+            category = i.customId;
+            page = 0;
+          }
+
           if (i.customId === 'next') page++;
           if (i.customId === 'prev') page = Math.max(0, page - 1);
           if (i.customId === 'refresh') items = await fetchShop();
           if (i.isStringSelectMenu()) { rarity = i.values[0]; page = 0; }
 
-          await i.update({ embeds: [buildEmbed(items, currentSection, page, rarity)], components: buildComponents(sectionNames, currentSection, page, rarity) });
+          await i.update({
+            embeds: [buildEmbed(items, category, page, rarity)],
+            components: buildComponents(category)
+          });
         });
       }
 
-      // ===== ADD ITEM =====
+      // TRACKING COMMANDS (unchanged)
       if (interaction.commandName === 'additem') {
-        if (!data.wanted.includes(name)) { data.wanted.push(name); writeData(data); await interaction.reply(`✅ Tracking ${name}`); }
-        else await interaction.reply('⚠️ Already tracking');
+        const name = interaction.options.getString('name');
+        if (!data.wanted.includes(name)) {
+          data.wanted.push(name);
+          writeData(data);
+          await interaction.reply(`✅ Tracking ${name}`);
+        } else await interaction.reply('Already tracking');
       }
 
-      // ===== REMOVE ITEM =====
       if (interaction.commandName === 'removeitem') {
+        const name = interaction.options.getString('name');
         data.wanted = data.wanted.filter(i => normalize(i) !== normalize(name));
         writeData(data);
         await interaction.reply(`❌ Removed ${name}`);
       }
 
-      // ===== LIST ITEMS =====
       if (interaction.commandName === 'listitems') {
-        await interaction.reply(data.wanted.length ? `📦 Tracked:\n${data.wanted.join('\n')}` : 'None');
+        await interaction.reply(data.wanted.length ? data.wanted.join('\n') : 'None');
       }
 
     } catch (err) {
       console.error(err);
-      if (interaction.deferred) await interaction.editReply('❌ Error occurred');
-      else await interaction.reply('❌ Error occurred');
+      if (interaction.deferred) await interaction.editReply('❌ Error');
+      else await interaction.reply('❌ Error');
     }
   }
 });
 
-// ===== AUTO SHOP CHECK & ALERTS =====
+// ===== ALERT SYSTEM =====
 async function checkShop() {
-  try {
-    const items = await fetchShop();
-    const data = readData();
-    const hash = JSON.stringify(items.map(i => i.name));
-    if (hash === data.lastShopHash) return;
-    data.lastShopHash = hash;
+  const items = await fetchShop();
+  const data = readData();
 
-    const matches = items.filter(i => data.wanted.some(w => normalize(i.name).includes(normalize(w))));
-    if (matches.length) {
-      const channel = await client.channels.fetch(ALERT_CHANNEL_ID);
-      await channel.send({
-        content: `<@${USER_ID}>`,
-        embeds: [new EmbedBuilder().setTitle('🚨 Item Found!').setDescription(matches.map(i => i.name).join('\n'))]
-      });
-      const user = await client.users.fetch(USER_ID);
-      await user.send(`🚨 Found:\n${matches.map(i => i.name).join('\n')}`);
-    }
+  const matches = items.filter(i =>
+    data.wanted.some(w => normalize(i.name).includes(normalize(w)))
+  );
 
-    writeData(data);
-  } catch (err) {
-    console.error("Shop check failed:", err.message);
+  if (matches.length) {
+    const channel = await client.channels.fetch(ALERT_CHANNEL_ID);
+    await channel.send({
+      content: `<@${USER_ID}>`,
+      embeds: [new EmbedBuilder().setTitle('🚨 Found!').setDescription(matches.map(i => i.name).join('\n'))]
+    });
   }
 }
 
-// ===== CRON =====
 cron.schedule('* * * * *', checkShop);
 
-// ===== LOGIN =====
 client.login(TOKEN);
